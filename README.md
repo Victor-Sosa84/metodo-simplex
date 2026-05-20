@@ -1,4 +1,4 @@
-# Método Simplex — IO1, Semestre 1 - 2026, FICCT - UAGRM 
+# Método Simplex
 
 Aplicación de escritorio para resolver problemas de Programación Lineal usando el **Método Simplex**. Cuenta con una interfaz gráfica con tres pestañas: Minimización, Maximización y Dualidad.
 
