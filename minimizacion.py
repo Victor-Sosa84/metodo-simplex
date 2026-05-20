@@ -259,3 +259,196 @@ if __name__ == '__main__':
         for nombre, valor in zip(p['variables'], resultado['x']):
             print(f"  {nombre:<18}: {valor:.6f} {p['unidad']}")
         print(f"\n  Costo minimo: Bs {resultado['z']:,.2f} / tonelada")
+
+
+# ─────────────────────────────────────────
+#  FUNCION CON PASOS (para mostrar tablas)
+# ─────────────────────────────────────────
+
+def simplex_gran_m_pasos(c, A, b, tipos_restriccion):
+    """
+    Igual que simplex_gran_m pero devuelve cada iteracion.
+    Retorna el mismo dict + clave 'pasos': list de snapshots de tabla.
+    Cada paso: {'titulo': str, 'headers': list, 'base': list, 'matriz': ndarray}
+    """
+    c = np.array(c, dtype=float)
+    A = np.array(A, dtype=float)
+    b = np.array(b, dtype=float)
+    m, n = A.shape
+
+    base = []
+    artificiales = []
+    cols_holgura = []
+    cols_artificial = []
+
+    # Paso 1: asignar holguras/excesos (todas primero)
+    col = n
+    costos_holgura = []
+    for i, tipo in enumerate(tipos_restriccion):
+        if tipo == '<=':
+            cols_holgura.append((i, col, +1))
+            costos_holgura.append(0)
+            col += 1
+        elif tipo == '>=':
+            cols_holgura.append((i, col, -1))
+            costos_holgura.append(0)
+            col += 1
+        elif tipo == '=':
+            cols_holgura.append(None)
+
+    # Paso 2: asignar artificiales (todas después)
+    costos_artificiales = []
+    for i, tipo in enumerate(tipos_restriccion):
+        if tipo in ('>=', '='):
+            cols_artificial.append((i, col))
+            artificiales.append(col)
+            costos_artificiales.append(M)
+            base.append(col)
+            col += 1
+        else:
+            cols_artificial.append(None)
+            # base para <= es la holgura
+            for fila, j_col, signo in [h for h in cols_holgura if h and h[0] == i]:
+                base.append(j_col)
+
+    # Reconstruir base en orden correcto (por fila)
+    base = []
+    for i, tipo in enumerate(tipos_restriccion):
+        if tipo == '<=':
+            # base es la holgura de esta fila
+            for h in cols_holgura:
+                if h and h[0] == i:
+                    base.append(h[1])
+                    break
+        else:
+            # base es la artificial de esta fila
+            for art in cols_artificial:
+                if art and art[0] == i:
+                    base.append(art[1])
+                    break
+
+    total_vars = col
+    c_ext = np.concatenate([c,
+                            np.array(costos_holgura, dtype=float),
+                            np.array(costos_artificiales, dtype=float)])
+
+    tabla = np.zeros((m, total_vars + 1))
+    tabla[:, :n] = A
+    tabla[:, -1] = b
+
+    for info in cols_holgura:
+        if info is not None:
+            i_fila, j_col, signo = info
+            tabla[i_fila, j_col] = signo
+    for info in cols_artificial:
+        if info is not None:
+            i_fila, j_col = info
+            tabla[i_fila, j_col] = 1
+
+    # Construir headers: todas las variables como x1, x2, x3...
+    headers = [f"x{j+1}" for j in range(total_vars)]
+    headers.append("b")
+
+    def nombre_var(idx):
+        if idx < total_vars:
+            return f"x{idx+1}"
+        return f"x{idx+1}"
+
+    # Vectores separados para parte normal y parte M
+    c_normal = c_ext.copy()
+    c_m = np.zeros_like(c_ext)
+    for idx in artificiales:
+        c_normal[idx] = 0.0
+        c_m[idx] = 1.0  # coeficiente M (1 unidad de M)
+
+    def snapshot(titulo):
+        c_B_normal = c_normal[base]
+        c_B_m = c_m[base]
+
+        # Fila Z (parte sin M)
+        z_row_n = c_B_normal @ tabla[:, :-1]
+        fila_z = -(z_row_n - c_normal)
+        z_rhs = -float(c_B_normal @ tabla[:, -1])
+
+        # Fila M
+        z_row_m = c_B_m @ tabla[:, :-1]
+        fila_m = -(z_row_m - c_m)
+        m_rhs = -float(c_B_m @ tabla[:, -1])
+
+        mat = np.vstack([tabla,
+                         np.append(fila_z, z_rhs),
+                         np.append(fila_m, m_rhs)])
+        return {
+            'titulo': titulo,
+            'headers': headers,
+            'base': [nombre_var(b) for b in base] + ['Z', 'M'],
+            'matriz': mat.copy()
+        }
+
+    pasos = [snapshot("Tabla Inicial")]
+    iteraciones = 0
+    MAX_ITER = 1000
+
+    while iteraciones < MAX_ITER:
+        iteraciones += 1
+        c_B = c_ext[base]
+        z_row = c_B @ tabla[:, :-1]
+        reducidos = z_row - c_ext
+
+        if np.all(reducidos <= 1e-8):
+            break
+
+        entrante = int(np.argmax(reducidos))
+        col_pivot = tabla[:, entrante]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cocientes = np.where(col_pivot > 1e-10, tabla[:, -1] / col_pivot, np.inf)
+
+        if np.all(np.isinf(cocientes)):
+            for idx, var_base in enumerate(base):
+                if var_base in artificiales and tabla[idx, -1] > 1e-6:
+                    return {
+                        'estado': 'no_factible', 'x': [], 'z': None,
+                        'iteraciones': iteraciones,
+                        'mensaje': 'El problema no tiene solucion factible.',
+                        'pasos': pasos
+                    }
+            return {
+                'estado': 'no_acotado', 'x': [], 'z': None,
+                'iteraciones': iteraciones,
+                'mensaje': 'El problema no esta acotado.',
+                'pasos': pasos
+            }
+
+        saliente = int(np.argmin(cocientes))
+        pivote = tabla[saliente, entrante]
+        tabla[saliente] /= pivote
+        for i in range(m):
+            if i != saliente:
+                tabla[i] -= tabla[i, entrante] * tabla[saliente]
+        base[saliente] = entrante
+
+        pasos.append(snapshot(f"Iteracion {iteraciones}"))
+
+    for idx, var_base in enumerate(base):
+        if var_base in artificiales and tabla[idx, -1] > 1e-6:
+            return {
+                'estado': 'no_factible', 'x': [], 'z': None,
+                'iteraciones': iteraciones,
+                'mensaje': 'El problema no tiene solucion factible.',
+                'pasos': pasos
+            }
+
+    x = np.zeros(total_vars)
+    for idx, var_base in enumerate(base):
+        x[var_base] = tabla[idx, -1]
+    x_originales = x[:n]
+    z = float(c @ x_originales)
+
+    return {
+        'estado': 'optimo',
+        'x': list(x_originales),
+        'z': z,
+        'iteraciones': iteraciones,
+        'mensaje': 'Solucion optima encontrada.',
+        'pasos': pasos
+    }
